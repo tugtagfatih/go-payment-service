@@ -4,7 +4,6 @@ import "github.com/gin-gonic/gin"
 
 func SetupRouter() *gin.Engine {
 	router := gin.Default()
-	router.GET("/ping", PingHandler)
 
 	// Kullanıcı işlemleri için bir grup oluşturalım.
 	userRoutes := router.Group("/users")

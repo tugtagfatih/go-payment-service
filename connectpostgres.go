@@ -13,7 +13,7 @@ import (
 func ConnectPosgres() {
 	// 1. .env dosyasını yükle
 	// Bu fonksiyonu main fonksiyonunun en başına koymak en iyi pratiktir.
-	err := godotenv.Load("postgres.env") // Dosya adını belirtiyoruz
+	err := godotenv.Load("/home/user/postgres.env") // Dosya adını belirtiyoruz
 	if err != nil {
 		log.Fatalf("Error loading .env file: %v", err)
 	}
