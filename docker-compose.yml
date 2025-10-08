@@ -2,9 +2,9 @@ version: '3.8'
 
 services:
   api:
-   container_name: gp-payment-service-api
+   container_name: go-payment-service-api
    build: .
    ports:
     - "8080:8080"
-  env_file:
+   env_file:
     - postgres.env
