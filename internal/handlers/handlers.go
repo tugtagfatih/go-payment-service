@@ -379,16 +379,16 @@ func (h *Handler) BuyListingHandler(c *gin.Context) {
 	// YENİ Adım 6: İşlem kayıtlarını oluştur.
 	// Alıcı için 'purchase' kaydı.
 	logPurchaseSQL := `
-    INSERT INTO transactions (wallet_id, type, amount, related_listing_id) 
-    VALUES ($1, 'purchase', $2, $3)`
+    INSERT INTO transactions (wallet_id, type, amount, related_listing_id, status) 
+    VALUES ($1, 'purchase', $2, $3, 'completed')` // status eklendi
 	_, err = tx.Exec(context.Background(), logPurchaseSQL, buyerWalletID, -listing.Price, listingID) // Tutar negatif
 	if err != nil {                                                                                  /* ... hata kontrolü ... */
 	}
 
 	// Satıcı için 'sale' kaydı.
 	logSaleSQL := `
-    INSERT INTO transactions (wallet_id, type, amount, related_listing_id) 
-    VALUES ($1, 'sale', $2, $3)`
+    INSERT INTO transactions (wallet_id, type, amount, related_listing_id, status) 
+    VALUES ($1, 'sale', $2, $3, 'completed')` // status eklendi
 	_, err = tx.Exec(context.Background(), logSaleSQL, sellerWalletID, listing.Price, listingID) // Tutar pozitif
 	if err != nil {                                                                              /* ... hata kontrolü ... */
 	}
@@ -477,4 +477,104 @@ func (h *Handler) GetTransactionHistoryHandler(c *gin.Context) {
 	// Adım 5: Sonucu JSON olarak döndür.
 	// Eğer hiç işlem yoksa, boş bir liste `[]` dönecektir, bu bir hata değildir.
 	c.JSON(http.StatusOK, transactions)
+}
+
+func (h *Handler) CreatePaymentNotificationHandler(c *gin.Context) {
+	userIDString, _ := c.Get("userID")
+	userID, _ := uuid.Parse(userIDString.(string))
+
+	var requestBody struct {
+		Amount float64 `json:"amount" binding:"required,gt=0"`
+		Notes  string  `json:"notes"`
+	}
+	if err := c.ShouldBindJSON(&requestBody); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	sql := `
+		INSERT INTO payment_notifications (user_id, amount, notes) 
+		VALUES ($1, $2, $3)`
+
+	_, err := h.DB.Exec(context.Background(), sql, userID, requestBody.Amount, requestBody.Notes)
+	if err != nil {
+		log.Printf("Ödeme bildirimi oluşturulurken hata: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Could not create payment notification"})
+		return
+	}
+
+	c.JSON(http.StatusCreated, gin.H{"message": "Payment notification received. It will be reviewed by an administrator."})
+}
+
+// ApprovePaymentNotificationHandler, bir adminin ödeme bildirimini onaylamasını simüle eder.
+func (h *Handler) ApprovePaymentNotificationHandler(c *gin.Context) {
+	notificationID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid notification ID format"})
+		return
+	}
+
+	tx, err := h.DB.Begin(context.Background())
+	if err != nil {
+		log.Printf("Admin onay tx başlatılamadı: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal server error"})
+		return
+	}
+	defer tx.Rollback(context.Background())
+
+	// Adım 1: Bildirimi al ve 'pending' durumunda olduğundan emin ol.
+	var notification models.PaymentNotification
+	var walletID uuid.UUID
+	selectSQL := `
+		SELECT pn.id, pn.user_id, pn.amount, pn.status, w.id as wallet_id
+		FROM payment_notifications pn
+		JOIN wallets w ON pn.user_id = w.user_id
+		WHERE pn.id = $1 FOR UPDATE`
+
+	err = tx.QueryRow(context.Background(), selectSQL, notificationID).Scan(&notification.ID, &notification.UserID, &notification.Amount, &notification.Status, &walletID)
+	if err != nil {
+		log.Printf("Onaylanacak bildirim bulunamadı veya sorgu hatası: %v", err)
+		c.JSON(http.StatusNotFound, gin.H{"error": "Payment notification not found"})
+		return // ÖNEMLİ: Hata varsa fonksiyondan çık
+	}
+	if notification.Status != "pending" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "This notification has already been processed."})
+		return
+	}
+
+	// Adım 2: Kullanıcının cüzdan bakiyesini güncelle.
+	updateWalletSQL := `UPDATE wallets SET balance = balance + $1 WHERE id = $2`
+	_, err = tx.Exec(context.Background(), updateWalletSQL, notification.Amount, walletID)
+	if err != nil {
+		log.Printf("Onay sırasında cüzdan güncellenirken hata: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update wallet"})
+		return // ÖNEMLİ: Hata varsa fonksiyondan çık
+	}
+
+	// Adım 3: İşlem kaydını (transaction log) oluştur.
+	logTransactionSQL := `INSERT INTO transactions (wallet_id, type, amount, status) VALUES ($1, 'deposit', $2, 'completed')` // status sütununu ve değerini ekledik
+	_, err = tx.Exec(context.Background(), logTransactionSQL, walletID, notification.Amount)
+	if err != nil {
+		log.Printf("Onay sırasında işlem loglanırken hata: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to log transaction"})
+		return // ÖNEMLİ: Hata varsa fonksiyondan çık
+	}
+
+	// Adım 4: Ödeme bildiriminin durumunu 'approved' olarak güncelle.
+	updateNotificationSQL := `UPDATE payment_notifications SET status = 'approved' WHERE id = $1`
+	_, err = tx.Exec(context.Background(), updateNotificationSQL, notificationID)
+	if err != nil {
+		log.Printf("Onay sırasında bildirim güncellenirken hata: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update notification"})
+		return // ÖNEMLİ: Hata varsa fonksiyondan çık
+	}
+
+	// Her şey yolundaysa transaction'ı onayla.
+	if err := tx.Commit(context.Background()); err != nil {
+		log.Printf("Admin onay tx commit edilemedi: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal server error during approval"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "Payment notification approved and user balance updated."})
 }

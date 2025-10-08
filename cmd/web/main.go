@@ -4,6 +4,7 @@ import (
 	"log"
 
 	"github.com/gin-gonic/gin"
+	"github.com/tugtagfatih/go-payment-service/firebase"
 	"github.com/tugtagfatih/go-payment-service/internal/auth"
 	"github.com/tugtagfatih/go-payment-service/internal/config"
 	"github.com/tugtagfatih/go-payment-service/internal/database"
@@ -64,8 +65,12 @@ func main() {
 		walletGroup := api.Group("/wallet")
 		{
 			walletGroup.GET("", h.GetWalletHandler)
-			walletGroup.POST("/deposit", h.DepositHandler)
+			walletGroup.POST("/notifications", h.CreatePaymentNotificationHandler)
 			walletGroup.GET("/history", h.GetTransactionHistoryHandler)
+		}
+		adminRoutes := router.Group("/admin")
+		{
+			adminRoutes.POST("/notifications/:id/approve", h.ApprovePaymentNotificationHandler)
 		}
 
 		listingsGroup := api.Group("/listings")
@@ -77,6 +82,7 @@ func main() {
 
 	// 6. Sunucuyu Başlat
 	log.Println("Sunucu 8080 portunda başlatılıyor...")
+	firebase.PrintFirebaseLink()
 	if err := router.Run(":8080"); err != nil {
 		log.Fatalf("Sunucu başlatılamadı: %v", err)
 	}

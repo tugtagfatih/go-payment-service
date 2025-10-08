@@ -40,3 +40,14 @@ type Transaction struct {
 	RelatedListingID *uuid.UUID `json:"related_listing_id,omitempty"` // Null olabilir
 	CreatedAt        time.Time  `json:"created_at"`
 }
+
+type PaymentNotification struct {
+	ID          uuid.UUID  `json:"id"`
+	UserID      uuid.UUID  `json:"user_id"`
+	Amount      float64    `json:"amount"`
+	Status      string     `json:"status"`
+	Notes       *string    `json:"notes,omitempty"` // Null olabilir
+	CreatedAt   time.Time  `json:"created_at"`
+	ReviewedBy  *uuid.UUID `json:"reviewed_by,omitempty"` // Null olabilir
+	ReviewedAt  *time.Time `json:"reviewed_at,omitempty"` // Null olabilir
+}
