@@ -17,6 +17,11 @@ type Auth struct {
 	SecretKey []byte
 }
 
+type AppClaims struct {
+	Role string `json:"role"`
+	jwt.RegisteredClaims
+}
+
 // NewAuth, yeni bir Auth servisi oluşturur ve başlatır.
 func NewAuth(secretKey string) (*Auth, error) {
 	if secretKey == "" {
@@ -26,18 +31,15 @@ func NewAuth(secretKey string) (*Auth, error) {
 }
 
 // GenerateJWT, belirtilen bir kullanıcı ID'si için yeni bir JWT oluşturur ve imzalar.
-func (a *Auth) GenerateJWT(userID uuid.UUID) (string, error) {
-	// Token'ın geçerlilik süresini 24 saat olarak ayarlıyoruz.
+func (a *Auth) GenerateJWT(userID uuid.UUID, userRole string) (string, error) {
 	expirationTime := time.Now().Add(24 * time.Hour)
-
-	// Token'ın "payload" kısmına koyacağımız bilgileri (claims) hazırlıyoruz.
-	// Subject (konu) olarak kullanıcının ID'sini kullanmak yaygın bir yöntemdir.
-	claims := &jwt.RegisteredClaims{
-		Subject:   userID.String(),
-		ExpiresAt: jwt.NewNumericDate(expirationTime),
+	claims := &AppClaims{
+		Role: userRole,
+		RegisteredClaims: jwt.RegisteredClaims{
+			Subject:   userID.String(),
+			ExpiresAt: jwt.NewNumericDate(expirationTime),
+		},
 	}
-
-	// Token'ı HS256 imzalama algoritması ve hazırladığımız claim'lerle oluşturuyoruz.
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
 
 	// Token'ı gizli anahtarımızla imzalayarak son haline getiriyoruz.
@@ -88,6 +90,48 @@ func (a *Auth) Middleware() gin.HandlerFunc {
 		c.Set("userID", claims.Subject)
 
 		// Her şey yolunda, isteğin bir sonraki adıma geçmesine izin ver.
+		c.Next()
+	}
+}
+
+// RoleMiddleware, belirli bir rol veya daha üst bir yetki gerektiren bir middleware oluşturur.
+func (a *Auth) RoleMiddleware(requiredRoles ...string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		// Önce normal token doğrulamasını yapıyoruz.
+		a.Middleware()(c)
+		// Eğer `Abort` edildiyse, context'ten `IsAborted()` ile anlayıp devam etmeyiz.
+		if c.IsAborted() {
+			return
+		}
+
+		// Token'dan gelen kullanıcı ID'sini alabiliriz (bu örnekte gerek yok ama bilgi için).
+		// userID, _ := c.Get("userID")
+
+		// Şimdi token'ı bizim özel AppClaims'imiz ile parse edip rolü alalım.
+		authHeader := c.GetHeader("Authorization")
+		tokenString := strings.TrimPrefix(authHeader, "Bearer ")
+
+		claims := &AppClaims{}
+		_, _, err := new(jwt.Parser).ParseUnverified(tokenString, claims)
+		if err != nil {
+			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "Invalid token claims"})
+			return
+		}
+
+		userRole := claims.Role
+		hasPermission := false
+		for _, role := range requiredRoles {
+			if userRole == role {
+				hasPermission = true
+				break
+			}
+		}
+
+		if !hasPermission {
+			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "You do not have permission to access this resource"})
+			return
+		}
+
 		c.Next()
 	}
 }

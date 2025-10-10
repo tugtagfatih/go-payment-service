@@ -3,6 +3,7 @@ package main
 import (
 	"log"
 
+	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 	"github.com/tugtagfatih/go-payment-service/firebase"
 	"github.com/tugtagfatih/go-payment-service/internal/auth"
@@ -12,9 +13,6 @@ import (
 )
 
 func main() {
-	// 1. Konfigürasyonu Yükle
-	// main.go `cmd/web` içinde olduğu için, kök dizindeki .env dosyasına ulaşmak
-	// için iki seviye yukarı çıkıyoruz ('../../').
 	cfg, err := config.LoadConfig("/home/user/postgres.env")
 	if err != nil {
 		log.Fatalf("Konfigürasyon yüklenemedi: %v", err)
@@ -44,6 +42,9 @@ func main() {
 
 	// 5. Router'ı Kur ve Rotaları Tanımla
 	router := gin.Default()
+	config := cors.DefaultConfig()
+	config.AllowOrigins = []string{"http://localhost:5173"}
+	router.Use(cors.New(config))
 
 	// Public Rotalar (kimlik doğrulaması gerektirmez)
 	publicRoutes := router.Group("/")
@@ -60,17 +61,35 @@ func main() {
 	api := router.Group("/api")
 	api.Use(authService.Middleware()) // Auth middleware'ini bu gruba uygula
 	{
-		api.GET("/profile", h.ProfileHandler)
+		profileGroup := api.Group("/profile")
+		{
+			profileGroup.GET("", h.ProfileHandler)
+			profileGroup.PUT("/change-password", h.ChangePasswordHandler)
+			profileGroup.PUT("/bank-info", h.UpdateUserBankInfoHandler)
+		}
 
 		walletGroup := api.Group("/wallet")
 		{
 			walletGroup.GET("", h.GetWalletHandler)
 			walletGroup.POST("/notifications", h.CreatePaymentNotificationHandler)
 			walletGroup.GET("/history", h.GetTransactionHistoryHandler)
+			walletGroup.POST("/withdraw", h.CreateWithdrawalRequestHandler)
 		}
 		adminRoutes := router.Group("/admin")
 		{
+			adminRoutes.GET("/notifications", h.ListPaymentNotificationsHandler)
+			adminRoutes.POST("/notifications/:id/reject", h.RejectPaymentNotificationHandler)
 			adminRoutes.POST("/notifications/:id/approve", h.ApprovePaymentNotificationHandler)
+			adminRoutes.GET("/withdrawals", h.ListWithdrawalRequestsHandler)
+			adminRoutes.POST("/withdrawals/:id/approve", h.ApproveWithdrawalRequestHandler)
+			// Sadece 'admin' veya 'master_admin' rollerinin erişebileceği endpoint
+			adminRoutes.POST("/users/:id/grant-approver", authService.RoleMiddleware("admin", "master_admin"), h.GrantApproverHandler) // Yeni bir handler
+
+			// Sadece 'master_admin'in erişebileceği endpoint
+			masterAdminRoutes := router.Group("/master-admin").Use(authService.Middleware(), authService.RoleMiddleware("master_admin"))
+			{
+				masterAdminRoutes.POST("/users/:id/grant-admin", h.GrantAdminHandler) // Yeni bir handler
+			}
 		}
 
 		listingsGroup := api.Group("/listings")

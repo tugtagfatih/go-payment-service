@@ -4,6 +4,7 @@ import (
 	"context"
 	"log"
 	"net/http"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -91,8 +92,9 @@ func (h *Handler) LoginHandler(c *gin.Context) {
 	}
 
 	var user models.User
-	sql := `SELECT id, password_hash FROM users WHERE email = $1`
-	err := h.DB.QueryRow(context.Background(), sql, requestBody.Email).Scan(&user.ID, &user.PasswordHash)
+	// SQL sorgusuna 'role' sütununu ekle
+	sql := `SELECT id, password_hash, role FROM users WHERE email = $1`
+	err := h.DB.QueryRow(context.Background(), sql, requestBody.Email).Scan(&user.ID, &user.PasswordHash, &user.Role)
 	if err != nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid email or password"})
 		return
@@ -104,7 +106,7 @@ func (h *Handler) LoginHandler(c *gin.Context) {
 		return
 	}
 
-	tokenString, err := h.Auth.GenerateJWT(user.ID)
+	tokenString, err := h.Auth.GenerateJWT(user.ID, user.Role)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate token"})
 		return
@@ -577,4 +579,419 @@ func (h *Handler) ApprovePaymentNotificationHandler(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"message": "Payment notification approved and user balance updated."})
+}
+
+// GrantAdminHandler, belirtilen kullanıcıya 'admin' rolü atar.
+// Sadece Master Admin tarafından erişilebilir olmalıdır.
+func (h *Handler) GrantAdminHandler(c *gin.Context) {
+	// Rolü atanacak kullanıcının ID'sini URL'den alıyoruz (örn: /master-admin/users/USER_ID/grant-admin)
+	userIDToGrant, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid user ID format"})
+		return
+	}
+
+	sql := `UPDATE users SET role = 'admin' WHERE id = $1`
+
+	result, err := h.DB.Exec(context.Background(), sql, userIDToGrant)
+	if err != nil {
+		log.Printf("Admin yetkisi verilirken veritabanı hatası: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Could not update user role"})
+		return
+	}
+
+	// UPDATE sorgusunun gerçekten bir satırı etkileyip etkilemediğini kontrol ediyoruz.
+	// Eğer 0 ise, o ID'ye sahip bir kullanıcı bulunamamıştır.
+	if result.RowsAffected() == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "User has been granted admin role successfully"})
+}
+
+// internal/handlers/handlers.go dosyasına eklenecek
+
+// GrantApproverHandler, belirtilen kullanıcıya 'approver' rolü atar.
+// Admin veya Master Admin tarafından erişilebilir olmalıdır.
+func (h *Handler) GrantApproverHandler(c *gin.Context) {
+	userIDToGrant, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid user ID format"})
+		return
+	}
+
+	sql := `UPDATE users SET role = 'approver' WHERE id = $1`
+
+	result, err := h.DB.Exec(context.Background(), sql, userIDToGrant)
+	if err != nil {
+		log.Printf("Onaylayıcı yetkisi verilirken veritabanı hatası: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Could not update user role"})
+		return
+	}
+
+	if result.RowsAffected() == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "User has been granted approver role successfully"})
+}
+
+func (h *Handler) ChangePasswordHandler(c *gin.Context) {
+	// 1. Context'ten kullanıcı ID'sini al.
+	userIDString, _ := c.Get("userID")
+	userID, _ := uuid.Parse(userIDString.(string))
+
+	// 2. İstekten gelen JSON verisini al ve doğrula.
+	var requestBody struct {
+		CurrentPassword string `json:"current_password" binding:"required"`
+		NewPassword     string `json:"new_password" binding:"required,min=6"`
+	}
+
+	if err := c.ShouldBindJSON(&requestBody); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	// 3. Veritabanından kullanıcının mevcut şifre hash'ini çek.
+	var currentPasswordHash string
+	sql := `SELECT password_hash FROM users WHERE id = $1`
+	err := h.DB.QueryRow(context.Background(), sql, userID).Scan(&currentPasswordHash)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
+		return
+	}
+
+	// 4. Mevcut şifrenin doğruluğunu kontrol et.
+	err = bcrypt.CompareHashAndPassword([]byte(currentPasswordHash), []byte(requestBody.CurrentPassword))
+	if err != nil {
+		// Şifre yanlışsa, bcrypt bir hata döndürür.
+		// Güvenlik için "Mevcut şifre yanlış" gibi spesifik bir mesaj vermiyoruz.
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid current password"})
+		return
+	}
+
+	// 5. Yeni şifreyi hash'le.
+	newHashedPassword, err := bcrypt.GenerateFromPassword([]byte(requestBody.NewPassword), bcrypt.DefaultCost)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to hash new password"})
+		return
+	}
+
+	// 6. Veritabanında yeni şifre hash'ini güncelle.
+	updateSQL := `UPDATE users SET password_hash = $1 WHERE id = $2`
+	_, err = h.DB.Exec(context.Background(), updateSQL, string(newHashedPassword), userID)
+	if err != nil {
+		log.Printf("Şifre güncellenirken veritabanı hatası: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Could not update password"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "Password updated successfully"})
+}
+
+func (h *Handler) ListPaymentNotificationsHandler(c *gin.Context) {
+	// Query parametresi olarak bir status alıyoruz, eğer belirtilmezse varsayılan olarak 'pending' kullanılıyor.
+	// Bu sayede adminler ?status=approved gibi filtrelemeler de yapabilir.
+	status := c.DefaultQuery("status", "pending")
+
+	// Admin paneli için kullanıcı adını da göstermek faydalı olacağından, users tablosuyla JOIN yapıyoruz.
+	sql := `
+		SELECT pn.id, pn.user_id, u.username, pn.amount, pn.status, pn.notes, pn.created_at
+		FROM payment_notifications pn
+		JOIN users u ON pn.user_id = u.id
+		WHERE pn.status = $1 
+		ORDER BY pn.created_at ASC` // En eski bildirim en üstte olacak şekilde sıralıyoruz.
+
+	rows, err := h.DB.Query(context.Background(), sql, status)
+	if err != nil {
+		log.Printf("Ödeme bildirimleri listelenirken hata: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Could not fetch payment notifications"})
+		return
+	}
+	defer rows.Close()
+
+	// Sonuçları tutmak için geçici bir struct listesi oluşturuyoruz.
+	// Bu struct, models.PaymentNotification'a ek olarak username içeriyor.
+	notifications := make([]struct {
+		ID        uuid.UUID `json:"id"`
+		UserID    uuid.UUID `json:"user_id"`
+		Username  string    `json:"username"`
+		Amount    float64   `json:"amount"`
+		Status    string    `json:"status"`
+		Notes     *string   `json:"notes,omitempty"`
+		CreatedAt time.Time `json:"created_at"`
+	}, 0)
+
+	for rows.Next() {
+		var notif struct {
+			ID        uuid.UUID `json:"id"`
+			UserID    uuid.UUID `json:"user_id"`
+			Username  string    `json:"username"`
+			Amount    float64   `json:"amount"`
+			Status    string    `json:"status"`
+			Notes     *string   `json:"notes,omitempty"`
+			CreatedAt time.Time `json:"created_at"`
+		}
+		if err := rows.Scan(&notif.ID, &notif.UserID, &notif.Username, &notif.Amount, &notif.Status, &notif.Notes, &notif.CreatedAt); err != nil {
+			log.Printf("Bildirim satırı okunurken hata: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Error processing notification data"})
+			return
+		}
+		notifications = append(notifications, notif)
+	}
+
+	if err := rows.Err(); err != nil {
+		log.Printf("Bildirimler okunurken satır hatası: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error reading notification list"})
+		return
+	}
+
+	c.JSON(http.StatusOK, notifications)
+}
+
+// RejectPaymentNotificationHandler, bir adminin ödeme bildirimini reddetmesini sağlar.
+func (h *Handler) RejectPaymentNotificationHandler(c *gin.Context) {
+	// DİKKAT: Gerçek bir uygulamada, bu endpoint'i çağıran kişinin admin rolüne
+	// sahip olup olmadığını kontrol eden bir middleware olmalıdır.
+
+	// Onaylayan adminin ID'sini context'ten alıyoruz, böylece kimin reddettiğini kaydedebiliriz.
+	// Bu rota admin grubunda olmadığı için şimdilik bu bilgiyi alamayız,
+	// ama admin middleware'i eklendiğinde bu satır çalışacaktır.
+	// adminID, _ := c.Get("userID")
+
+	notificationID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid notification ID format"})
+		return
+	}
+
+	// Sadece 'pending' durumundaki bildirimlerin reddedilebildiğinden emin oluyoruz.
+	sql := `
+		UPDATE payment_notifications 
+		SET status = 'rejected', reviewed_at = NOW() --, reviewed_by = $1
+		WHERE id = $2 AND status = 'pending'`
+
+	result, err := h.DB.Exec(context.Background(), sql, notificationID) // adminID'yi de ekleyebiliriz
+	if err != nil {
+		log.Printf("Bildirim reddedilirken veritabanı hatası: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Could not update notification status"})
+		return
+	}
+
+	// Eğer etkilenen satır sayısı 0 ise, ya bildirim bulunamamıştır ya da 'pending' durumunda değildir.
+	if result.RowsAffected() == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Pending notification not found or already processed"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "Payment notification has been rejected."})
+}
+
+func (h *Handler) UpdateUserBankInfoHandler(c *gin.Context) {
+	userIDString, _ := c.Get("userID")
+	userID, _ := uuid.Parse(userIDString.(string))
+
+	var requestBody struct {
+		IBAN string `json:"iban" binding:"required"` // Şimdilik sadece IBAN alıyoruz
+	}
+	if err := c.ShouldBindJSON(&requestBody); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	// TODO: Gelen IBAN'ın formatının doğru olup olmadığını kontrol eden bir doğrulama eklenebilir.
+
+	sql := `UPDATE users SET iban = $1 WHERE id = $2`
+	_, err := h.DB.Exec(context.Background(), sql, requestBody.IBAN, userID)
+	if err != nil {
+		log.Printf("Banka bilgisi güncellenirken hata: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Could not update bank information"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "Bank information updated successfully."})
+}
+
+func (h *Handler) CreateWithdrawalRequestHandler(c *gin.Context) {
+	userIDString, _ := c.Get("userID")
+	userID, _ := uuid.Parse(userIDString.(string))
+
+	var requestBody struct {
+		Amount float64 `json:"amount" binding:"required,gt=0"`
+	}
+	if err := c.ShouldBindJSON(&requestBody); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	// --- TRANSACTION BAŞLAT ---
+	tx, err := h.DB.Begin(context.Background())
+	if err != nil {
+		log.Printf("Withdrawal tx başlatılamadı: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal server error"})
+		return
+	}
+	defer tx.Rollback(context.Background())
+
+	// Adım 1: Kullanıcının bakiyesini ve IBAN'ını kontrol et.
+	// Cüzdan satırını FOR UPDATE ile kilitleyerek, bu işlem sırasında kullanıcının
+	// başka bir harcama yapıp bakiyeyi değiştirmesini engelliyoruz.
+	var balance float64
+	var iban *string // IBAN null olabilir, bu yüzden pointer kullanıyoruz.
+	selectSQL := `
+		SELECT w.balance, u.iban 
+		FROM wallets w JOIN users u ON w.user_id = u.id 
+		WHERE u.id = $1 FOR UPDATE`
+
+	err = tx.QueryRow(context.Background(), selectSQL, userID).Scan(&balance, &iban)
+	if err != nil {
+		log.Printf("Para çekme talebinde kullanıcı bilgileri alınamadı: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Could not retrieve user wallet information"})
+		return
+	}
+
+	// Adım 2: İş kurallarını kontrol et.
+	if iban == nil || *iban == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Please add your bank information (IBAN) to your profile before requesting a withdrawal."})
+		return
+	}
+	if balance < requestBody.Amount {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Insufficient funds"})
+		return
+	}
+
+	// Adım 3: Para çekme talebini veritabanına ekle.
+	// DİKKAT: Bu adımda kullanıcının bakiyesini HENÜZ DÜŞÜRMÜYORUZ.
+	insertSQL := `
+		INSERT INTO withdrawal_requests (user_id, amount, target_iban) 
+		VALUES ($1, $2, $3)`
+	_, err = tx.Exec(context.Background(), insertSQL, userID, requestBody.Amount, *iban)
+	if err != nil {
+		log.Printf("Para çekme talebi oluşturulurken hata: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Could not create withdrawal request"})
+		return
+	}
+
+	// --- TRANSACTION'I ONAYLA ---
+	if err := tx.Commit(context.Background()); err != nil {
+		log.Printf("Withdrawal tx commit edilemedi: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal server error"})
+		return
+	}
+
+	c.JSON(http.StatusCreated, gin.H{"message": "Withdrawal request created successfully. It will be reviewed by an administrator."})
+}
+
+func (h *Handler) ListWithdrawalRequestsHandler(c *gin.Context) {
+	status := c.DefaultQuery("status", "pending")
+
+	sql := `
+		SELECT wr.id, wr.user_id, u.username, wr.amount, wr.target_iban, wr.status, wr.created_at
+		FROM withdrawal_requests wr
+		JOIN users u ON wr.user_id = u.id
+		WHERE wr.status = $1 
+		ORDER BY wr.created_at ASC`
+
+	rows, err := h.DB.Query(context.Background(), sql, status)
+	if err != nil {
+		log.Printf("Para çekme talepleri listelenirken hata: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Could not fetch withdrawal requests"})
+		return
+	}
+	defer rows.Close()
+
+	// Sonuçları tutmak için geçici bir struct listesi
+	requests := make([]struct {
+		ID         uuid.UUID `json:"id"`
+		UserID     uuid.UUID `json:"user_id"`
+		Username   string    `json:"username"`
+		Amount     float64   `json:"amount"`
+		TargetIBAN string    `json:"target_iban"`
+		Status     string    `json:"status"`
+		CreatedAt  time.Time `json:"created_at"`
+	}, 0)
+
+	for rows.Next() {
+		var req struct {
+			ID         uuid.UUID `json:"id"`
+			UserID     uuid.UUID `json:"user_id"`
+			Username   string    `json:"username"`
+			Amount     float64   `json:"amount"`
+			TargetIBAN string    `json:"target_iban"`
+			Status     string    `json:"status"`
+			CreatedAt  time.Time `json:"created_at"`
+		}
+		if err := rows.Scan(&req.ID, &req.UserID, &req.Username, &req.Amount, &req.TargetIBAN, &req.Status, &req.CreatedAt); err != nil {
+			log.Printf("Çekme talebi satırı okunurken hata: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Error processing request data"})
+			return
+		}
+		requests = append(requests, req)
+	}
+	if err := rows.Err(); err != nil { /* ...hata kontrolü... */
+	}
+
+	c.JSON(http.StatusOK, requests)
+}
+
+// ApproveWithdrawalRequestHandler, bir adminin para çekme talebini onaylamasını sağlar.
+func (h *Handler) ApproveWithdrawalRequestHandler(c *gin.Context) {
+	// DİKKAT: Bu endpoint admin yetkisi ile korunmalıdır.
+	// adminID, _ := c.Get("userID") // Admin middleware'i eklenince kullanılacak.
+
+	requestID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request ID format"})
+		return
+	}
+
+	tx, err := h.DB.Begin(context.Background())
+	if err != nil { /* ...hata kontrolü... */
+	}
+	defer tx.Rollback(context.Background())
+
+	// Adım 1: Talebi al, 'pending' olduğundan emin ol ve kilitle.
+	var request models.WithdrawalRequest
+	err = tx.QueryRow(context.Background(), `SELECT id, user_id, amount, status FROM withdrawal_requests WHERE id = $1 FOR UPDATE`, requestID).Scan(&request.ID, &request.UserID, &request.Amount, &request.Status)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Withdrawal request not found"})
+		return
+	}
+	if request.Status != "pending" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "This request has already been processed."})
+		return
+	}
+
+	// Adım 2: Kullanıcının bakiyesini düşür.
+	// Bu bir güvenlik kontrolüdür, bakiye zaten talep oluşturulurken kontrol edilmişti.
+	result, err := tx.Exec(context.Background(), `UPDATE wallets SET balance = balance - $1 WHERE user_id = $2 AND balance >= $1`, request.Amount, request.UserID)
+	if err != nil { /* ...hata kontrolü... */
+	}
+	if result.RowsAffected() == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Insufficient funds or wallet not found."})
+		return
+	}
+
+	// Adım 3: İşlem kaydını (transaction log) oluştur.
+	var walletID uuid.UUID
+	tx.QueryRow(context.Background(), `SELECT id FROM wallets WHERE user_id = $1`, request.UserID).Scan(&walletID)
+	_, err = tx.Exec(context.Background(), `INSERT INTO transactions (wallet_id, type, amount, status) VALUES ($1, 'withdrawal', $2, 'completed')`, walletID, -request.Amount)
+	if err != nil { /* ...hata kontrolü... */
+	}
+
+	// Adım 4: Para çekme talebinin durumunu 'completed' olarak güncelle.
+	_, err = tx.Exec(context.Background(), `UPDATE withdrawal_requests SET status = 'completed', reviewed_at = NOW() WHERE id = $1`, requestID)
+	if err != nil { /* ...hata kontrolü... */
+	}
+
+	// Her şey yolundaysa transaction'ı onayla.
+	if err := tx.Commit(context.Background()); err != nil {
+		log.Printf("Para çekme onayı tx commit edilemedi: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal server error during approval"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "Withdrawal request approved and user balance updated."})
 }
