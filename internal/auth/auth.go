@@ -18,7 +18,9 @@ type Auth struct {
 }
 
 type AppClaims struct {
-	Role string `json:"role"`
+	Role     string `json:"role"`
+	Username string `json:"username"` // YENİ ALAN
+	Email    string `json:"email"`    // YENİ ALAN
 	jwt.RegisteredClaims
 }
 
@@ -31,10 +33,13 @@ func NewAuth(secretKey string) (*Auth, error) {
 }
 
 // GenerateJWT, belirtilen bir kullanıcı ID'si için yeni bir JWT oluşturur ve imzalar.
-func (a *Auth) GenerateJWT(userID uuid.UUID, userRole string) (string, error) {
+
+func (a *Auth) GenerateJWT(userID uuid.UUID, userRole string, username string, email string) (string, error) {
 	expirationTime := time.Now().Add(24 * time.Hour)
 	claims := &AppClaims{
-		Role: userRole,
+		Role:     userRole,
+		Username: username, // YENİ ALAN
+		Email:    email,    // YENİ ALAN
 		RegisteredClaims: jwt.RegisteredClaims{
 			Subject:   userID.String(),
 			ExpiresAt: jwt.NewNumericDate(expirationTime),
@@ -42,7 +47,6 @@ func (a *Auth) GenerateJWT(userID uuid.UUID, userRole string) (string, error) {
 	}
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
 
-	// Token'ı gizli anahtarımızla imzalayarak son haline getiriyoruz.
 	tokenString, err := token.SignedString(a.SecretKey)
 	if err != nil {
 		return "", err
@@ -136,3 +140,4 @@ func (a *Auth) RoleMiddleware(requiredRoles ...string) gin.HandlerFunc {
 		c.Next()
 	}
 }
+

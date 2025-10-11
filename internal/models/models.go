@@ -40,6 +40,7 @@ type Transaction struct {
 	WalletID         uuid.UUID  `json:"wallet_id"`
 	Type             string     `json:"type"`
 	Amount           float64    `json:"amount"`
+	Status           string     `json:"status"`
 	RelatedListingID *uuid.UUID `json:"related_listing_id,omitempty"` // Null olabilir
 	CreatedAt        time.Time  `json:"created_at"`
 }
@@ -65,3 +66,4 @@ type WithdrawalRequest struct {
 	ReviewedBy *uuid.UUID `json:"reviewed_by,omitempty"`
 	ReviewedAt *time.Time `json:"reviewed_at,omitempty"`
 }
+

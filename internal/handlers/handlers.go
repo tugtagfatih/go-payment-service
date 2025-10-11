@@ -93,12 +93,11 @@ func (h *Handler) LoginHandler(c *gin.Context) {
 
 	var user models.User
 	// DÖRT sütun seçiyoruz: id, password_hash, role, account_status
-	sql := `SELECT id, password_hash, role, account_status FROM users WHERE email = $1`
+	sql := `SELECT id, username, email, password_hash, role, account_status FROM users WHERE email = $1`
 
 	// Ve DÖRT değişkene okuyoruz: &user.ID, &user.PasswordHash, &user.Role, &user.AccountStatus
-	err := h.DB.QueryRow(context.Background(), sql, requestBody.Email).Scan(&user.ID, &user.PasswordHash, &user.Role, &user.AccountStatus)
+	err := h.DB.QueryRow(context.Background(), sql, requestBody.Email).Scan(&user.ID, &user.Username, &user.Email, &user.PasswordHash, &user.Role, &user.AccountStatus)
 	if err != nil {
-		// Bu hata, kullanıcı bulunamadığında VEYA Scan işlemi başarısız olduğunda tetiklenir.
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid email or password"})
 		return
 	}
@@ -117,7 +116,7 @@ func (h *Handler) LoginHandler(c *gin.Context) {
 	}
 
 	// JWT oluşturma
-	tokenString, err := h.Auth.GenerateJWT(user.ID, user.Role)
+	tokenString, err := h.Auth.GenerateJWT(user.ID, user.Role, user.Username, user.Email)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate token"})
 		return
@@ -214,21 +213,34 @@ func (h *Handler) ListListingsHandler(c *gin.Context) {
 }
 
 func (h *Handler) ProfileHandler(c *gin.Context) {
-	// AuthMiddleware'den gelen userID'yi alıyoruz.
-	// c.Get() bir interface{} döndürdüğü için tip dönüşümü (type assertion) yapmamız gerekebilir.
-	userID, exists := c.Get("userID")
+	userIDString, exists := c.Get("userID")
 	if !exists {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "User ID not found in context"})
 		return
 	}
 
-	// TODO: Bu userID ile veritabanından kullanıcının tüm bilgilerini
-	// (username, email, balance vb.) çekip döndürebilirsin.
-	// Şimdilik sadece ID'yi döndürelim.
+	userID, err := uuid.Parse(userIDString.(string))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid user ID format"})
+		return
+	}
 
+	// Kullanıcının bilgilerini veritabanından çekiyoruz.
+	var user models.User
+	sql := `SELECT id, username, email, iban FROM users WHERE id = $1`
+	err = h.DB.QueryRow(context.Background(), sql, userID).Scan(&user.ID, &user.Username, &user.Email, &user.IBAN)
+	if err != nil {
+		log.Printf("Profil bilgileri alınırken hata: %v", err)
+		c.JSON(http.StatusNotFound, gin.H{"error": "User profile not found"})
+		return
+	}
+
+	// Şifre hash'i gibi hassas bilgileri göndermeden sadece gerekli bilgileri döndürüyoruz.
 	c.JSON(http.StatusOK, gin.H{
-		"message": "Welcome to your profile!",
-		"user_id": userID,
+		"id":       user.ID,
+		"username": user.Username,
+		"email":    user.Email,
+		"iban":     user.IBAN, // IBAN bilgisi null olabilir, bu sorun değil.
 	})
 }
 
@@ -432,7 +444,7 @@ func (h *Handler) GetTransactionHistoryHandler(c *gin.Context) {
 
 	// Adım 3: Bulunan cüzdan ID'si ile tüm işlemleri çek.
 	transactionsSQL := `
-		SELECT id, wallet_id, type, amount, related_listing_id, created_at 
+		SELECT id, wallet_id, type, amount, status, related_listing_id, created_at 
 		FROM transactions 
 		WHERE wallet_id = $1 
 		ORDER BY created_at DESC`
@@ -449,9 +461,8 @@ func (h *Handler) GetTransactionHistoryHandler(c *gin.Context) {
 	transactions := make([]models.Transaction, 0)
 	for rows.Next() {
 		var t models.Transaction
-		// Scan fonksiyonundaki değişkenlerin sırası, SELECT sorgusundaki sütunların sırasıyla
-		// birebir aynı olmalıdır.
-		if err := rows.Scan(&t.ID, &t.WalletID, &t.Type, &t.Amount, &t.RelatedListingID, &t.CreatedAt); err != nil {
+		// Scan fonksiyonuna &t.Status eklendi
+		if err := rows.Scan(&t.ID, &t.WalletID, &t.Type, &t.Amount, &t.Status, &t.RelatedListingID, &t.CreatedAt); err != nil {
 			log.Printf("İşlem satırı okunurken hata: %v", err)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Error processing transaction data"})
 			return
