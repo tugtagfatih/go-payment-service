@@ -7,13 +7,14 @@ import (
 )
 
 type User struct {
-	ID           uuid.UUID `json:"id"`
-	Username     string    `json:"username"`
-	Email        string    `json:"email"`
-	CreatedAt    time.Time `json:"created_at"`
-	IBAN         *string   `json:"iban,omitempty"` //Pointer çünkü boş da olabilir
-	Role         string    `json:"role"`
-	PasswordHash string    `json:"-"`
+	ID            uuid.UUID `json:"id"`
+	Username      string    `json:"username"`
+	Email         string    `json:"email"`
+	CreatedAt     time.Time `json:"created_at"`
+	IBAN          *string   `json:"iban,omitempty"` //Pointer çünkü boş da olabilir
+	Role          string    `json:"role"`
+	AccountStatus string    `json:"account_status"`
+	PasswordHash  string    `json:"-"`
 }
 
 type Listing struct {

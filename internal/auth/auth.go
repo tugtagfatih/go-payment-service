@@ -69,7 +69,7 @@ func (a *Auth) Middleware() gin.HandlerFunc {
 		}
 
 		// Token'ı parse et ve doğrula.
-		claims := &jwt.RegisteredClaims{}
+		claims := &AppClaims{}
 		token, err := jwt.ParseWithClaims(tokenString, claims, func(token *jwt.Token) (interface{}, error) {
 			// İmzalama metodunun, token'ı bizim oluştururken kullandığımız
 			// metot (HMAC) olup olmadığını kontrol etmek önemlidir.
@@ -88,6 +88,7 @@ func (a *Auth) Middleware() gin.HandlerFunc {
 
 		// Token geçerliyse, sonraki handler'ların kullanabilmesi için kullanıcı ID'sini context'e ekle.
 		c.Set("userID", claims.Subject)
+		c.Set("userRole", claims.Role) // Bu satırı ekleyin
 
 		// Her şey yolunda, isteğin bir sonraki adıma geçmesine izin ver.
 		c.Next()

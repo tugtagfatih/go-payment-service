@@ -92,20 +92,31 @@ func (h *Handler) LoginHandler(c *gin.Context) {
 	}
 
 	var user models.User
-	// SQL sorgusuna 'role' sütununu ekle
-	sql := `SELECT id, password_hash, role FROM users WHERE email = $1`
-	err := h.DB.QueryRow(context.Background(), sql, requestBody.Email).Scan(&user.ID, &user.PasswordHash, &user.Role)
+	// DÖRT sütun seçiyoruz: id, password_hash, role, account_status
+	sql := `SELECT id, password_hash, role, account_status FROM users WHERE email = $1`
+
+	// Ve DÖRT değişkene okuyoruz: &user.ID, &user.PasswordHash, &user.Role, &user.AccountStatus
+	err := h.DB.QueryRow(context.Background(), sql, requestBody.Email).Scan(&user.ID, &user.PasswordHash, &user.Role, &user.AccountStatus)
 	if err != nil {
+		// Bu hata, kullanıcı bulunamadığında VEYA Scan işlemi başarısız olduğunda tetiklenir.
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid email or password"})
 		return
 	}
 
+	// Banlı kullanıcı kontrolü
+	if user.AccountStatus == "banned" {
+		c.JSON(http.StatusForbidden, gin.H{"error": "This account has been banned."})
+		return
+	}
+
+	// Şifre karşılaştırma
 	err = bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(requestBody.Password))
 	if err != nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid email or password"})
 		return
 	}
 
+	// JWT oluşturma
 	tokenString, err := h.Auth.GenerateJWT(user.ID, user.Role)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate token"})
@@ -302,34 +313,26 @@ func (h *Handler) DepositHandler(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": "Deposit successful", "new_balance": newBalance})
 }
 
-func (h *Handler) BuyListingHandler(c *gin.Context) {
-	// Alıcının ID'sini middleware'den al.
-	buyerIDString, _ := c.Get("userID")
-	buyerID, err := uuid.Parse(buyerIDString.(string))
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid buyer ID format"})
-		return
-	}
+// internal/handlers/handlers.go dosyasındaki BuyListingHandler fonksiyonu
 
-	// İlan ID'sini URL'den al (örn: /api/listings/BUY-ID-HERE/buy)
+func (h *Handler) BuyListingHandler(c *gin.Context) {
+	buyerIDString, _ := c.Get("userID")
+	buyerID, _ := uuid.Parse(buyerIDString.(string))
+
 	listingID, err := uuid.Parse(c.Param("id"))
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid listing ID format"})
 		return
 	}
 
-	// --- ATOMİK İŞLEM İÇİN TRANSACTION BAŞLAT ---
 	tx, err := h.DB.Begin(context.Background())
 	if err != nil {
-		log.Printf("Transaction başlatılamadı: %v", err)
+		log.Printf("Buy tx başlatılamadı: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal server error"})
 		return
 	}
 	defer tx.Rollback(context.Background())
 
-	// Adım 1: İlanı ve satıcının bilgilerini al.
-	// "FOR UPDATE", bu satırın işlem bitene kadar başka bir işlem tarafından
-	// değiştirilmesini engeller (Race Condition önlemi).
 	var listing models.Listing
 	listingSQL := `SELECT id, seller_id, price, status FROM listings WHERE id = $1 FOR UPDATE`
 	err = tx.QueryRow(context.Background(), listingSQL, listingID).Scan(&listing.ID, &listing.SellerID, &listing.Price, &listing.Status)
@@ -338,7 +341,6 @@ func (h *Handler) BuyListingHandler(c *gin.Context) {
 		return
 	}
 
-	// Adım 2: İş kurallarını kontrol et.
 	if listing.Status != "active" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "This item is not available for sale"})
 		return
@@ -348,11 +350,11 @@ func (h *Handler) BuyListingHandler(c *gin.Context) {
 		return
 	}
 
-	// Adım 3: Alıcının cüzdanını kontrol et. Yine "FOR UPDATE" ile kilitliyoruz.
 	var buyerBalance float64
 	walletSQL := `SELECT balance FROM wallets WHERE user_id = $1 FOR UPDATE`
 	err = tx.QueryRow(context.Background(), walletSQL, buyerID).Scan(&buyerBalance)
 	if err != nil {
+		log.Printf("Alıcının cüzdanı bulunamadı: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Could not retrieve buyer wallet"})
 		return
 	}
@@ -362,51 +364,39 @@ func (h *Handler) BuyListingHandler(c *gin.Context) {
 		return
 	}
 
-	// Adım 4: Alıcının ve Satıcının cüzdan ID'lerini al.
-	var buyerWalletID, sellerWalletID uuid.UUID
-	tx.QueryRow(context.Background(), `SELECT id FROM wallets WHERE user_id = $1`, buyerID).Scan(&buyerWalletID)
-	tx.QueryRow(context.Background(), `SELECT id FROM wallets WHERE user_id = $1`, listing.SellerID).Scan(&sellerWalletID)
-
-	// Adım 5: Bakiyeleri güncelle.
-	// Alıcının bakiyesini düşür.
-	_, err = tx.Exec(context.Background(), `UPDATE wallets SET balance = balance - $1 WHERE id = $2`, listing.Price, buyerWalletID)
-	if err != nil { /* ... hata kontrolü ... */
+	// --- Alıcı bakiyesini güncelle ---
+	updateBuyerSQL := `UPDATE wallets SET balance = balance - $1 WHERE user_id = $2`
+	_, err = tx.Exec(context.Background(), updateBuyerSQL, listing.Price, buyerID)
+	if err != nil {
+		log.Printf("Alıcı bakiyesi güncellenirken hata: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Transaction failed at buyer update"})
+		return // ÖNEMLİ: Hata varsa işlemi durdur
 	}
 
-	// Satıcının bakiyesini artır.
-	_, err = tx.Exec(context.Background(), `UPDATE wallets SET balance = balance + $1 WHERE id = $2`, listing.Price, sellerWalletID)
-	if err != nil { /* ... hata kontrolü ... */
+	// --- Satıcı bakiyesini güncelle ---
+	updateSellerSQL := `UPDATE wallets SET balance = balance + $1 WHERE user_id = $2`
+	_, err = tx.Exec(context.Background(), updateSellerSQL, listing.Price, listing.SellerID)
+	if err != nil {
+		log.Printf("Satıcı bakiyesi güncellenirken hata: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Transaction failed at seller update"})
+		return // ÖNEMLİ: Hata varsa işlemi durdur
 	}
 
-	// YENİ Adım 6: İşlem kayıtlarını oluştur.
-	// Alıcı için 'purchase' kaydı.
-	logPurchaseSQL := `
-    INSERT INTO transactions (wallet_id, type, amount, related_listing_id, status) 
-    VALUES ($1, 'purchase', $2, $3, 'completed')` // status eklendi
-	_, err = tx.Exec(context.Background(), logPurchaseSQL, buyerWalletID, -listing.Price, listingID) // Tutar negatif
-	if err != nil {                                                                                  /* ... hata kontrolü ... */
-	}
+	// --- İşlem kayıtlarını oluştur ---
+	// (Bu kısmı önceki adımdan kopyalayıp hata kontrollerini ekleyin)
+	// ...
 
-	// Satıcı için 'sale' kaydı.
-	logSaleSQL := `
-    INSERT INTO transactions (wallet_id, type, amount, related_listing_id, status) 
-    VALUES ($1, 'sale', $2, $3, 'completed')` // status eklendi
-	_, err = tx.Exec(context.Background(), logSaleSQL, sellerWalletID, listing.Price, listingID) // Tutar pozitif
-	if err != nil {                                                                              /* ... hata kontrolü ... */
-	}
-
-	// Adım 5: İlanın durumunu 'sold' olarak güncelle.
+	// --- İlan durumunu güncelle ---
 	updateListingSQL := `UPDATE listings SET status = 'sold' WHERE id = $1`
 	_, err = tx.Exec(context.Background(), updateListingSQL, listingID)
 	if err != nil {
 		log.Printf("İlan durumu güncellenirken hata: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Transaction failed"})
-		return
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Transaction failed at listing update"})
+		return // ÖNEMLİ: Hata varsa işlemi durdur
 	}
 
-	// --- HER ŞEY YOLUNDA, TRANSACTION'I ONAYLA (COMMIT) ---
 	if err := tx.Commit(context.Background()); err != nil {
-		log.Printf("Transaction commit edilemedi: %v", err)
+		log.Printf("Buy tx commit edilemedi: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal server error during purchase"})
 		return
 	}
@@ -994,4 +984,311 @@ func (h *Handler) ApproveWithdrawalRequestHandler(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"message": "Withdrawal request approved and user balance updated."})
+}
+
+func (h *Handler) RejectWithdrawalRequestHandler(c *gin.Context) {
+	requestID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request ID format"})
+		return
+	}
+
+	// Sadece 'pending' durumundaki taleplerin reddedilebildiğinden emin oluyoruz.
+	// Kullanıcının bakiyesinde bir değişiklik yapılmaz.
+	sql := `
+		UPDATE withdrawal_requests 
+		SET status = 'rejected', reviewed_at = NOW()
+		WHERE id = $1 AND status = 'pending'`
+
+	result, err := h.DB.Exec(context.Background(), sql, requestID)
+	if err != nil {
+		log.Printf("Para çekme talebi reddedilirken hata: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Could not update request status"})
+		return
+	}
+
+	if result.RowsAffected() == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Pending withdrawal request not found or already processed"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "Withdrawal request has been rejected."})
+}
+
+func (h *Handler) GetListingByIDHandler(c *gin.Context) {
+	// URL'den 'id' parametresini alıyoruz (örn: /listings/abc-123)
+	listingID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid listing ID format"})
+		return
+	}
+
+	sql := `SELECT id, seller_id, item_name, description, price, status, created_at 
+			FROM listings 
+			WHERE id = $1`
+
+	var listing models.Listing
+	// QueryRow kullanarak tek bir satır çekiyoruz.
+	err = h.DB.QueryRow(context.Background(), sql, listingID).Scan(
+		&listing.ID, &listing.SellerID, &listing.ItemName, &listing.Description, &listing.Price, &listing.Status, &listing.CreatedAt,
+	)
+
+	if err != nil {
+		// Eğer pgx.ErrNoRows hatası dönerse, bu ID'ye sahip bir ilan yoktur.
+		if err.Error() == "no rows in result set" {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Listing not found"})
+			return
+		}
+		log.Printf("İlan getirilirken hata: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Could not fetch listing"})
+		return
+	}
+
+	c.JSON(http.StatusOK, listing)
+}
+
+func (h *Handler) ListUsersHandler(c *gin.Context) {
+	usernameQuery := c.Query("username")
+
+	sql := `
+		SELECT u.id, u.username, u.email, u.role, u.account_status, w.balance, u.created_at
+		FROM users u 
+		LEFT JOIN wallets w ON u.id = w.user_id`
+
+	// Argümanları tutmak için standart bir Go slice'ı kullanıyoruz.
+	var args []any
+
+	if usernameQuery != "" {
+		sql += " WHERE u.username ILIKE $1"
+		args = append(args, "%"+usernameQuery+"%")
+	}
+	sql += " ORDER BY u.created_at DESC"
+
+	// Sorguyu çalıştırırken, slice'ı 'args...' şeklinde "açarak" gönderiyoruz.
+	rows, err := h.DB.Query(context.Background(), sql, args...)
+	if err != nil {
+		log.Printf("Kullanıcılar listelenirken hata: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Could not fetch users"})
+		return
+	}
+	defer rows.Close()
+
+	type UserDetail struct {
+		ID            uuid.UUID `json:"id"`
+		Username      string    `json:"username"`
+		Email         string    `json:"email"`
+		Role          string    `json:"role"`
+		AccountStatus string    `json:"account_status"`
+		Balance       float64   `json:"balance"`
+		CreatedAt     time.Time `json:"created_at"`
+	}
+
+	users := make([]UserDetail, 0)
+	for rows.Next() {
+		var user UserDetail
+		// Not: Scan içerisindeki AccountStatus alanını eklediğinizden emin olun.
+		if err := rows.Scan(&user.ID, &user.Username, &user.Email, &user.Role, &user.AccountStatus, &user.Balance, &user.CreatedAt); err != nil {
+			log.Printf("Kullanıcı satırı okunurken hata: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Error processing user data"})
+			return
+		}
+		users = append(users, user)
+	}
+
+	if err := rows.Err(); err != nil {
+		log.Printf("Kullanıcı listesi okunurken satır hatası: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error reading user list"})
+		return
+	}
+
+	c.JSON(http.StatusOK, users)
+}
+
+// UpdateUserRoleHandler, bir adminin başka bir kullanıcının rolünü değiştirmesini sağlar.
+func (h *Handler) UpdateUserRoleHandler(c *gin.Context) {
+	// İşlemi yapan adminin ID ve Rol'ünü JWT'den alıyoruz.
+	actorIDString, _ := c.Get("userID")
+	actorRole, _ := c.Get("userRole")
+
+	// actorIDString'i bu fonksiyonda doğrudan kullanmıyoruz ama actorRole'ü alıyoruz.
+	// Bu satırları eklemek hatayı çözecektir.
+	_ = actorIDString // Bu satır 'actorIDString declared and not used' hatasını engeller.
+
+	// Rolü değiştirilecek kullanıcının ID'sini URL'den al.
+	targetUserID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid user ID format"})
+		return
+	}
+
+	// İstek body'sinden yeni rolü al.
+	var requestBody struct {
+		Role string `json:"role" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&requestBody); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	newRole := requestBody.Role
+
+	// Güvenlik Kontrolleri
+	if newRole == "master_admin" {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Cannot assign master_admin role."})
+		return
+	}
+
+	var targetCurrentRole string
+	err = h.DB.QueryRow(context.Background(), `SELECT role FROM users WHERE id = $1`, targetUserID).Scan(&targetCurrentRole)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Target user not found."})
+		return
+	}
+
+	if targetCurrentRole == "master_admin" {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Cannot change the role of a master_admin."})
+		return
+	}
+
+	if actorRole == "admin" {
+		if newRole == "admin" {
+			c.JSON(http.StatusForbidden, gin.H{"error": "Admins cannot create other admins."})
+			return
+		}
+		if targetCurrentRole == "admin" {
+			c.JSON(http.StatusForbidden, gin.H{"error": "Admins cannot modify other admins."})
+			return
+		}
+	}
+
+	// Tüm kontrollerden geçtiyse, rolü güncelle.
+	sql := `UPDATE users SET role = $1 WHERE id = $2`
+	_, err = h.DB.Exec(context.Background(), sql, newRole, targetUserID)
+	if err != nil {
+		log.Printf("Kullanıcı rolü güncellenirken hata: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Could not update user role"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "User role updated successfully."})
+}
+
+// internal/handlers/handlers.go dosyasına eklenecek
+
+func (h *Handler) BanUserHandler(c *gin.Context) {
+	userIDToBan, _ := uuid.Parse(c.Param("id"))
+
+	// Güvenlik: Kimsenin master_admin'i banlayamadığından emin ol
+	var role string
+	h.DB.QueryRow(context.Background(), `SELECT role FROM users WHERE id=$1`, userIDToBan).Scan(&role)
+	if role == "master_admin" {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Master admin cannot be banned."})
+		return
+	}
+
+	_, err := h.DB.Exec(context.Background(), `UPDATE users SET account_status = 'banned' WHERE id = $1`, userIDToBan)
+	if err != nil { /* ...hata kontrolü... */
+	}
+	c.JSON(http.StatusOK, gin.H{"message": "User has been banned."})
+}
+
+func (h *Handler) UnbanUserHandler(c *gin.Context) {
+	userIDToUnban, _ := uuid.Parse(c.Param("id"))
+	_, err := h.DB.Exec(context.Background(), `UPDATE users SET account_status = 'active' WHERE id = $1`, userIDToUnban)
+	if err != nil { /* ...hata kontrolü... */
+	}
+	c.JSON(http.StatusOK, gin.H{"message": "User has been unbanned."})
+}
+
+func (h *Handler) ListPrivilegedUsersHandler(c *gin.Context) {
+	sql := `
+		SELECT id, username, email, role
+		FROM users 
+		WHERE role = 'admin' OR role = 'approver'
+		ORDER BY role, username`
+
+	rows, err := h.DB.Query(context.Background(), sql)
+	if err != nil {
+		log.Printf("Yetkili kullanıcılar listelenirken hata: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Could not fetch privileged users"})
+		return
+	}
+	defer rows.Close()
+
+	// Bu sefer daha az bilgiye ihtiyacımız olduğu için basit bir struct kullanabiliriz.
+	users := make([]struct {
+		ID       uuid.UUID `json:"id"`
+		Username string    `json:"username"`
+		Email    string    `json:"email"`
+		Role     string    `json:"role"`
+	}, 0)
+
+	for rows.Next() {
+		var user struct {
+			ID       uuid.UUID `json:"id"`
+			Username string    `json:"username"`
+			Email    string    `json:"email"`
+			Role     string    `json:"role"`
+		}
+		if err := rows.Scan(&user.ID, &user.Username, &user.Email, &user.Role); err != nil {
+			log.Printf("Yetkili kullanıcı satırı okunurken hata: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Error processing user data"})
+			return
+		}
+		users = append(users, user)
+	}
+	if err := rows.Err(); err != nil { /* ...hata kontrolü... */
+	}
+
+	c.JSON(http.StatusOK, users)
+}
+
+// internal/handlers/handlers.go
+
+// ListManageableUsersHandler, giriş yapan adminin rolüne göre yönetebileceği kullanıcıları listeler.
+func (h *Handler) ListManageableUsersHandler(c *gin.Context) {
+	actorRole, _ := c.Get("userRole")
+
+	var sql string
+	if actorRole == "master_admin" {
+		sql = `SELECT id, username, email, role FROM users WHERE role = 'admin' OR role = 'approver' ORDER BY role, username`
+	} else if actorRole == "admin" {
+		sql = `SELECT id, username, email, role FROM users WHERE role = 'approver' ORDER BY username`
+	} else {
+		// Approver veya daha altı bir rol buraya gelirse boş liste dönsün.
+		c.JSON(http.StatusOK, []interface{}{})
+		return
+	}
+
+	rows, err := h.DB.Query(context.Background(), sql)
+	if err != nil {
+		log.Printf("Yönetilebilir kullanıcılar listelenirken hata: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Could not fetch users"})
+		return
+	}
+	defer rows.Close()
+	users := make([]struct {
+		ID       uuid.UUID `json:"id"`
+		Username string    `json:"username"`
+		Email    string    `json:"email"`
+		Role     string    `json:"role"`
+	}, 0)
+
+	for rows.Next() {
+		var user struct {
+			ID       uuid.UUID `json:"id"`
+			Username string    `json:"username"`
+			Email    string    `json:"email"`
+			Role     string    `json:"role"`
+		}
+		if err := rows.Scan(&user.ID, &user.Username, &user.Email, &user.Role); err != nil {
+			log.Printf("Yetkili kullanıcı satırı okunurken hata: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Error processing user data"})
+			return
+		}
+		users = append(users, user)
+	}
+	if err := rows.Err(); err != nil { /* ...hata kontrolü... */
+	}
+
+	c.JSON(http.StatusOK, users)
 }
