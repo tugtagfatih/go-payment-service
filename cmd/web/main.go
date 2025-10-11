@@ -49,7 +49,6 @@ func main() {
 	config.AllowHeaders = []string{"Origin", "Content-Type", "Authorization"}
 	router.Use(cors.New(config))
 
-	// Public Rotalar (kimlik doğrulaması gerektirmez)
 	publicRoutes := router.Group("/")
 	{
 		authGroup := publicRoutes.Group("/auth")
@@ -61,7 +60,7 @@ func main() {
 		publicRoutes.GET("/listings/:id", h.GetListingByIDHandler)
 	}
 
-	// Korumalı (Protected) Rotalar (geçerli bir JWT gerektirir)
+	// Korumalı (Protected) KULLANICI Rotaları
 	api := router.Group("/api")
 	api.Use(authService.Middleware()) // Auth middleware'ini bu gruba uygula
 	{
@@ -79,36 +78,40 @@ func main() {
 			walletGroup.GET("/history", h.GetTransactionHistoryHandler)
 			walletGroup.POST("/withdraw", h.CreateWithdrawalRequestHandler)
 		}
-		adminRoutes := router.Group("/admin")
-		adminRoutes.Use(authService.RoleMiddleware("approver", "admin", "master_admin"))
-		{
-			adminRoutes.GET("/notifications", h.ListPaymentNotificationsHandler)
-			adminRoutes.POST("/notifications/:id/reject", h.RejectPaymentNotificationHandler)
-			adminRoutes.POST("/notifications/:id/approve", h.ApprovePaymentNotificationHandler)
-			adminRoutes.GET("/withdrawals", h.ListWithdrawalRequestsHandler)
-			adminRoutes.POST("/withdrawals/:id/approve", h.ApproveWithdrawalRequestHandler)
-			adminRoutes.POST("/withdrawals/:id/reject", h.RejectWithdrawalRequestHandler)
-			adminRoutes.GET("/users", authService.RoleMiddleware("admin", "master_admin"), h.ListUsersHandler)
-			adminRoutes.POST("/users/:id/ban", authService.RoleMiddleware("admin", "master_admin"), h.BanUserHandler)
-			adminRoutes.POST("/users/:id/unban", authService.RoleMiddleware("admin", "master_admin"), h.UnbanUserHandler)
-
-			// Sadece 'master_admin' rol değiştirebilir. (Bu kuralı isteğinize göre gevşetebilirsiniz).
-			adminRoutes.PUT("/users/:id/role", authService.RoleMiddleware("admin", "master_admin"), h.UpdateUserRoleHandler)
-			// Sadece 'admin' veya 'master_admin' rollerinin erişebileceği endpoint
-			adminRoutes.POST("/users/:id/grant-approver", authService.RoleMiddleware("admin", "master_admin"), h.GrantApproverHandler) // Yeni bir handler
-			adminRoutes.GET("/manageable-users", authService.RoleMiddleware("admin", "master_admin"), h.ListManageableUsersHandler)
-			// Sadece 'master_admin'in erişebileceği endpoint
-			masterAdminRoutes := router.Group("/master-admin").Use(authService.Middleware(), authService.RoleMiddleware("master_admin"))
-			{
-				masterAdminRoutes.POST("/users/:id/grant-admin", h.GrantAdminHandler) // Yeni bir handler
-			}
-		}
 
 		listingsGroup := api.Group("/listings")
 		{
 			listingsGroup.POST("", h.CreateListingHandler)
 			listingsGroup.POST("/:id/buy", h.BuyListingHandler)
 		}
+	}
+
+	// Korumalı (Protected) ADMİN Rotaları (AYRI BİR GRUP)
+	adminRoutes := router.Group("/admin")
+	adminRoutes.Use(authService.Middleware(), authService.RoleMiddleware("approver", "admin", "master_admin"))
+	{
+		adminRoutes.GET("/notifications", h.ListPaymentNotificationsHandler)
+		adminRoutes.POST("/notifications/:id/reject", h.RejectPaymentNotificationHandler)
+		adminRoutes.POST("/notifications/:id/approve", h.ApprovePaymentNotificationHandler)
+
+		adminRoutes.GET("/withdrawals", h.ListWithdrawalRequestsHandler)
+		adminRoutes.POST("/withdrawals/:id/approve", h.ApproveWithdrawalRequestHandler)
+		adminRoutes.POST("/withdrawals/:id/reject", h.RejectPaymentNotificationHandler)
+
+		adminRoutes.GET("/users", authService.RoleMiddleware("admin", "master_admin"), h.ListUsersHandler)
+		adminRoutes.POST("/users/:id/ban", authService.RoleMiddleware("admin", "master_admin"), h.BanUserHandler)
+		adminRoutes.POST("/users/:id/unban", authService.RoleMiddleware("admin", "master_admin"), h.UnbanUserHandler)
+
+		adminRoutes.PUT("/users/:id/role", authService.RoleMiddleware("admin", "master_admin"), h.UpdateUserRoleHandler)
+
+		adminRoutes.GET("/manageable-users", authService.RoleMiddleware("admin", "master_admin"), h.ListManageableUsersHandler)
+	}
+
+	// Korumalı (Protected) MASTER ADMİN Rotaları (AYRI BİR GRUP)
+	masterAdminRoutes := router.Group("/master-admin")
+	masterAdminRoutes.Use(authService.Middleware(), authService.RoleMiddleware("master_admin"))
+	{
+		masterAdminRoutes.POST("/users/:id/grant-admin", h.GrantAdminHandler)
 	}
 
 	// 6. Sunucuyu Başlat
