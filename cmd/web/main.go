@@ -43,10 +43,15 @@ func main() {
 	// 5. Router'ı Kur ve Rotaları Tanımla
 	router := gin.Default()
 	config := cors.DefaultConfig()
-	//config.AllowOrigins = []string{"http://localhost:5173"}
-	config.AllowAllOrigins = true
-	config.AllowMethods = []string{"GET", "POST", "PUT", "DELETE"}
-	config.AllowHeaders = []string{"Origin", "Content-Type", "Authorization"}
+	config.AllowOrigins = []string{
+		"http://13.53.130.143:5173",
+		"http://payment.treuy.com",
+		"https://payment.treuy.com",
+	}
+	//config.AllowAllOrigins = true
+	config.AllowMethods = []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"}
+	config.AllowHeaders = []string{"Origin", "Content-Type", "Authorization", "Accept"}
+	config.AllowCredentials = true
 	router.Use(cors.New(config))
 
 	publicRoutes := router.Group("/")
