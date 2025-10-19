@@ -7,14 +7,15 @@ import (
 )
 
 type User struct {
-	ID            uuid.UUID `json:"id"`
-	Username      string    `json:"username"`
-	Email         string    `json:"email"`
-	CreatedAt     time.Time `json:"created_at"`
-	IBAN          *string   `json:"iban,omitempty"` //Pointer çünkü boş da olabilir
-	Role          string    `json:"role"`
-	AccountStatus string    `json:"account_status"`
-	PasswordHash  string    `json:"-"`
+	ID                 uuid.UUID `json:"id"`
+	Username           string    `json:"username"`
+	Email              string    `json:"email"`
+	CreatedAt          time.Time `json:"created_at"`
+	WithdrawalBankName *string   `json:"withdrawal_bank_name,omitempty"`
+	IBAN               *string   `json:"iban,omitempty"` //Pointer çünkü boş da olabilir
+	Role               string    `json:"role"`
+	AccountStatus      string    `json:"account_status"`
+	PasswordHash       string    `json:"-"`
 }
 
 type Listing struct {
@@ -46,24 +47,37 @@ type Transaction struct {
 }
 
 type PaymentNotification struct {
-	ID         uuid.UUID  `json:"id"`
-	UserID     uuid.UUID  `json:"user_id"`
-	Amount     float64    `json:"amount"`
-	Status     string     `json:"status"`
-	Notes      *string    `json:"notes,omitempty"` // Null olabilir
-	CreatedAt  time.Time  `json:"created_at"`
-	ReviewedBy *uuid.UUID `json:"reviewed_by,omitempty"` // Null olabilir
-	ReviewedAt *time.Time `json:"reviewed_at,omitempty"` // Null olabilir
+	ID              uuid.UUID  `json:"id"`
+	UserID          uuid.UUID  `json:"user_id"`
+	Amount          float64    `json:"amount"`
+	Status          string     `json:"status"`
+	Notes           *string    `json:"notes,omitempty"` // Null olabilir
+	CreatedAt       time.Time  `json:"created_at"`
+	ReviewedBy      *uuid.UUID `json:"reviewed_by,omitempty"` // Null olabilir
+	ReviewedAt      *time.Time `json:"reviewed_at,omitempty"` // Null olabilir
+	Username        string     `json:"username,omitempty"`
+	DepositBankName *string    `json:"deposit_bank_name,omitempty"`
+}
+
+type DepositBank struct {
+	ID                uuid.UUID `json:"id"`
+	BankName          string    `json:"bank_name"`
+	IBAN              *string   `json:"iban,omitempty"`                // Null olabilir
+	AccountHolderName *string   `json:"account_holder_name,omitempty"` // Null olabilir
+	IsActive          bool      `json:"is_active"`
+	CreatedAt         time.Time `json:"created_at"`
+	UpdatedAt         time.Time `json:"updated_at"`
 }
 
 type WithdrawalRequest struct {
-	ID         uuid.UUID  `json:"id"`
-	UserID     uuid.UUID  `json:"user_id"`
-	Amount     float64    `json:"amount"`
-	TargetIBAN string     `json:"target_iban"`
-	Status     string     `json:"status"`
-	CreatedAt  time.Time  `json:"created_at"`
-	ReviewedBy *uuid.UUID `json:"reviewed_by,omitempty"`
-	ReviewedAt *time.Time `json:"reviewed_at,omitempty"`
+	ID                 uuid.UUID  `json:"id"`
+	UserID             uuid.UUID  `json:"user_id"`
+	Amount             float64    `json:"amount"`
+	TargetIBAN         string     `json:"target_iban"`
+	Status             string     `json:"status"`
+	CreatedAt          time.Time  `json:"created_at"`
+	ReviewedBy         *uuid.UUID `json:"reviewed_by,omitempty"`
+	ReviewedAt         *time.Time `json:"reviewed_at,omitempty"`
+	Username           string     `json:"username,omitempty"`
+	WithdrawalBankName *string    `json:"withdrawal_bank_name,omitempty"`
 }
-

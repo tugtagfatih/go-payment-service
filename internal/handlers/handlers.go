@@ -4,10 +4,12 @@ import (
 	"context"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/tugtagfatih/go-payment-service/internal/auth"
 	"github.com/tugtagfatih/go-payment-service/internal/models"
@@ -227,8 +229,8 @@ func (h *Handler) ProfileHandler(c *gin.Context) {
 
 	// Kullanıcının bilgilerini veritabanından çekiyoruz.
 	var user models.User
-	sql := `SELECT id, username, email, iban FROM users WHERE id = $1`
-	err = h.DB.QueryRow(context.Background(), sql, userID).Scan(&user.ID, &user.Username, &user.Email, &user.IBAN)
+	sql := `SELECT id, username, email, iban, withdrawal_bank_name FROM users WHERE id = $1`                                                 // withdrawal_bank_name eklendi
+	err = h.DB.QueryRow(context.Background(), sql, userID).Scan(&user.ID, &user.Username, &user.Email, &user.IBAN, &user.WithdrawalBankName) // Scan içine eklendi
 	if err != nil {
 		log.Printf("Profil bilgileri alınırken hata: %v", err)
 		c.JSON(http.StatusNotFound, gin.H{"error": "User profile not found"})
@@ -237,10 +239,11 @@ func (h *Handler) ProfileHandler(c *gin.Context) {
 
 	// Şifre hash'i gibi hassas bilgileri göndermeden sadece gerekli bilgileri döndürüyoruz.
 	c.JSON(http.StatusOK, gin.H{
-		"id":       user.ID,
-		"username": user.Username,
-		"email":    user.Email,
-		"iban":     user.IBAN, // IBAN bilgisi null olabilir, bu sorun değil.
+		"id":                   user.ID,
+		"username":             user.Username,
+		"email":                user.Email,
+		"iban":                 user.IBAN,
+		"withdrawal_bank_name": user.WithdrawalBankName, // YENİ EKLENDİ
 	})
 }
 
@@ -483,23 +486,43 @@ func (h *Handler) GetTransactionHistoryHandler(c *gin.Context) {
 }
 
 func (h *Handler) CreatePaymentNotificationHandler(c *gin.Context) {
+	ctx := c.Request.Context() // Context güncellendi
 	userIDString, _ := c.Get("userID")
 	userID, _ := uuid.Parse(userIDString.(string))
 
 	var requestBody struct {
-		Amount float64 `json:"amount" binding:"required,gt=0"`
-		Notes  string  `json:"notes"`
+		Amount        float64    `json:"amount" binding:"required,gt=0"`
+		Notes         *string    `json:"notes"`                              // Artık pointer
+		DepositBankID *uuid.UUID `json:"deposit_bank_id" binding:"required"` // YENİ EKLENDİ, zorunlu
+		SenderName    *string    `json:"sender_name" binding:"required"`     // YENİ EKLENDİ, zorunlu
 	}
 	if err := c.ShouldBindJSON(&requestBody); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
-	sql := `
-		INSERT INTO payment_notifications (user_id, amount, notes) 
-		VALUES ($1, $2, $3)`
+	// Seçilen bankanın aktif olup olmadığını kontrol et (güvenlik için)
+	var isActive bool
+	var bankExists bool
+	err := h.DB.QueryRow(ctx, "SELECT is_active FROM deposit_banks WHERE id = $1", requestBody.DepositBankID).Scan(&isActive)
+	if err == nil {
+		bankExists = true
+	} else if err != pgx.ErrNoRows { // Sorgu hatası varsa logla
+		log.Printf("Ödeme bildirimi için banka kontrolü sırasında hata: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Could not verify deposit bank"})
+		return
+	}
 
-	_, err := h.DB.Exec(context.Background(), sql, userID, requestBody.Amount, requestBody.Notes)
+	if !bankExists || !isActive {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Selected bank is not valid or not active."})
+		return
+	}
+
+	sql := `
+		INSERT INTO payment_notifications (user_id, amount, notes, deposit_bank_id, sender_name)
+		VALUES ($1, $2, $3, $4, $5)`
+
+	_, err = h.DB.Exec(ctx, sql, userID, requestBody.Amount, requestBody.Notes, requestBody.DepositBankID, requestBody.SenderName) // Context ve yeni alanlar eklendi
 	if err != nil {
 		log.Printf("Ödeme bildirimi oluşturulurken hata: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Could not create payment notification"})
@@ -791,21 +814,40 @@ func (h *Handler) RejectPaymentNotificationHandler(c *gin.Context) {
 }
 
 func (h *Handler) UpdateUserBankInfoHandler(c *gin.Context) {
+	ctx := c.Request.Context() // Context güncellendi
 	userIDString, _ := c.Get("userID")
 	userID, _ := uuid.Parse(userIDString.(string))
 
 	var requestBody struct {
-		IBAN string `json:"iban" binding:"required"` // Şimdilik sadece IBAN alıyoruz
+		IBAN               *string `json:"iban"`                 // Artık pointer
+		WithdrawalBankName *string `json:"withdrawal_bank_name"` // YENİ EKLENDİ - Pointer
 	}
 	if err := c.ShouldBindJSON(&requestBody); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
-	// TODO: Gelen IBAN'ın formatının doğru olup olmadığını kontrol eden bir doğrulama eklenebilir.
+	// IBAN için temizleme ve format kontrolü (önceki adımdaki gibi, isteğe bağlı)
+	var finalIBAN *string
+	if requestBody.IBAN != nil && *requestBody.IBAN != "" {
+		tempIBAN := strings.ReplaceAll(*requestBody.IBAN, " ", "")
+		tempIBAN = strings.ToUpper(tempIBAN)
+		finalIBAN = &tempIBAN
+	} else {
+		finalIBAN = nil // IBAN boş gönderildiyse null yap
+	}
 
-	sql := `UPDATE users SET iban = $1 WHERE id = $2`
-	_, err := h.DB.Exec(context.Background(), sql, requestBody.IBAN, userID)
+	// Banka adı boş gönderildiyse null yap
+	var finalBankName *string
+	if requestBody.WithdrawalBankName != nil && *requestBody.WithdrawalBankName != "" {
+		finalBankName = requestBody.WithdrawalBankName
+	} else {
+		finalBankName = nil
+	}
+
+	// Hem IBAN hem Banka Adı'nı güncelle
+	sql := `UPDATE users SET iban = $1, withdrawal_bank_name = $2 WHERE id = $3`
+	_, err := h.DB.Exec(ctx, sql, finalIBAN, finalBankName, userID) // Context güncellendi
 	if err != nil {
 		log.Printf("Banka bilgisi güncellenirken hata: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Could not update bank information"})
@@ -886,16 +928,20 @@ func (h *Handler) CreateWithdrawalRequestHandler(c *gin.Context) {
 }
 
 func (h *Handler) ListWithdrawalRequestsHandler(c *gin.Context) {
+	ctx := c.Request.Context() // Context güncellendi
 	status := c.DefaultQuery("status", "pending")
 
+	// Users tablosuyla JOIN yaparak kullanıcı adı ve banka adını alalım
 	sql := `
-		SELECT wr.id, wr.user_id, u.username, wr.amount, wr.target_iban, wr.status, wr.created_at
+		SELECT
+			wr.id, wr.user_id, u.username, wr.amount, wr.target_iban, wr.status, wr.created_at,
+			u.withdrawal_bank_name -- YENİ EKLENDİ
 		FROM withdrawal_requests wr
 		JOIN users u ON wr.user_id = u.id
-		WHERE wr.status = $1 
+		WHERE wr.status = $1
 		ORDER BY wr.created_at ASC`
 
-	rows, err := h.DB.Query(context.Background(), sql, status)
+	rows, err := h.DB.Query(ctx, sql, status) // Context güncellendi
 	if err != nil {
 		log.Printf("Para çekme talepleri listelenirken hata: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Could not fetch withdrawal requests"})
@@ -903,35 +949,12 @@ func (h *Handler) ListWithdrawalRequestsHandler(c *gin.Context) {
 	}
 	defer rows.Close()
 
-	// Sonuçları tutmak için geçici bir struct listesi
-	requests := make([]struct {
-		ID         uuid.UUID `json:"id"`
-		UserID     uuid.UUID `json:"user_id"`
-		Username   string    `json:"username"`
-		Amount     float64   `json:"amount"`
-		TargetIBAN string    `json:"target_iban"`
-		Status     string    `json:"status"`
-		CreatedAt  time.Time `json:"created_at"`
-	}, 0)
-
-	for rows.Next() {
-		var req struct {
-			ID         uuid.UUID `json:"id"`
-			UserID     uuid.UUID `json:"user_id"`
-			Username   string    `json:"username"`
-			Amount     float64   `json:"amount"`
-			TargetIBAN string    `json:"target_iban"`
-			Status     string    `json:"status"`
-			CreatedAt  time.Time `json:"created_at"`
-		}
-		if err := rows.Scan(&req.ID, &req.UserID, &req.Username, &req.Amount, &req.TargetIBAN, &req.Status, &req.CreatedAt); err != nil {
-			log.Printf("Çekme talebi satırı okunurken hata: %v", err)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Error processing request data"})
-			return
-		}
-		requests = append(requests, req)
-	}
-	if err := rows.Err(); err != nil { /* ...hata kontrolü... */
+	// Güncellenmiş models.WithdrawalRequest struct'ına okuyalım
+	requests, err := pgx.CollectRows(rows, pgx.RowToStructByName[models.WithdrawalRequest])
+	if err != nil {
+		log.Printf("Çekme talebi satırları işlenirken hata: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error processing request data"})
+		return
 	}
 
 	c.JSON(http.StatusOK, requests)
@@ -1302,4 +1325,134 @@ func (h *Handler) ListManageableUsersHandler(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, users)
+}
+
+func (h *Handler) ListDepositBanksHandler(c *gin.Context) {
+	ctx := c.Request.Context()
+	sql := `SELECT id, bank_name, iban, account_holder_name, is_active, created_at, updated_at
+			FROM deposit_banks ORDER BY bank_name ASC`
+
+	rows, err := h.DB.Query(ctx, sql)
+	if err != nil {
+		log.Printf("Banka listesi alınırken hata: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Could not fetch deposit banks"})
+		return
+	}
+	defer rows.Close()
+
+	banks, err := pgx.CollectRows(rows, pgx.RowToStructByName[models.DepositBank])
+	if err != nil {
+		log.Printf("Banka listesi işlenirken hata: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error processing bank data"})
+		return
+	}
+
+	c.JSON(http.StatusOK, banks)
+}
+
+func (h *Handler) GetActiveDepositBanksHandler(c *gin.Context) {
+	ctx := c.Request.Context()
+	// Sadece ID, Banka Adı ve IBAN yeterli olabilir kullanıcı için
+	sql := `SELECT id, bank_name, iban, account_holder_name
+			FROM deposit_banks WHERE is_active = true ORDER BY bank_name ASC`
+
+	rows, err := h.DB.Query(ctx, sql)
+	if err != nil {
+		log.Printf("Aktif banka listesi alınırken hata: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Could not fetch active deposit banks"})
+		return
+	}
+	defer rows.Close()
+
+	// Sadece gerekli alanları içeren geçici bir struct kullanalım
+	type ActiveBankInfo struct {
+		ID                uuid.UUID `json:"id"`
+		BankName          string    `json:"bank_name"`
+		IBAN              *string   `json:"iban"` // Gösterilecek IBAN
+		AccountHolderName *string   `json:"account_holder_name"`
+	}
+
+	banks, err := pgx.CollectRows(rows, pgx.RowToStructByName[ActiveBankInfo])
+	if err != nil {
+		log.Printf("Aktif banka listesi işlenirken hata: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error processing active bank data"})
+		return
+	}
+
+	c.JSON(http.StatusOK, banks)
+}
+
+func (h *Handler) UpdateDepositBankHandler(c *gin.Context) {
+	ctx := c.Request.Context()
+	bankID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid bank ID format"})
+		return
+	}
+
+	var requestBody struct {
+		IBAN              *string `json:"iban"` // Pointer, boş gönderilebilmesi için
+		AccountHolderName *string `json:"account_holder_name"`
+	}
+
+	if err := c.ShouldBindJSON(&requestBody); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	// --- IBAN Regex Kontrolü Kaldırıldı ---
+	// Gelen IBAN'ın boşluklarını temizle ve büyük harfe çevir (isteğe bağlı, formatı korumak için kalabilir)
+	var finalIBAN *string
+	if requestBody.IBAN != nil && *requestBody.IBAN != "" {
+		tempIBAN := strings.ReplaceAll(*requestBody.IBAN, " ", "")
+		tempIBAN = strings.ToUpper(tempIBAN)
+		finalIBAN = &tempIBAN
+	} else {
+		// Eğer IBAN boş gönderildiyse veya null ise, null olarak kaydet
+		finalIBAN = nil
+	}
+	// --- Kontrol Sonu ---
+
+	// Temizlenmiş (veya null) IBAN'ı veritabanına kaydet
+	sql := `UPDATE deposit_banks SET iban = $1, account_holder_name = $2, updated_at = NOW() WHERE id = $3`
+	_, err = h.DB.Exec(ctx, sql, finalIBAN, requestBody.AccountHolderName, bankID) // finalIBAN kullanıldı
+	if err != nil {
+		log.Printf("Banka bilgisi güncellenirken hata: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Could not update bank information"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "Bank information updated successfully."})
+}
+
+func (h *Handler) ToggleDepositBankStatusHandler(c *gin.Context) {
+	ctx := c.Request.Context()
+	bankID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid bank ID format"})
+		return
+	}
+
+	// Mevcut durumu alıp tersine çevirelim
+	var currentStatus bool
+	err = h.DB.QueryRow(ctx, "SELECT is_active FROM deposit_banks WHERE id = $1", bankID).Scan(&currentStatus)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Bank not found"})
+		return
+	}
+
+	newStatus := !currentStatus
+	sql := `UPDATE deposit_banks SET is_active = $1, updated_at = NOW() WHERE id = $2`
+	_, err = h.DB.Exec(ctx, sql, newStatus, bankID)
+	if err != nil {
+		log.Printf("Banka durumu güncellenirken hata: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Could not update bank status"})
+		return
+	}
+
+	message := "Bank activated successfully."
+	if !newStatus {
+		message = "Bank deactivated successfully."
+	}
+	c.JSON(http.StatusOK, gin.H{"message": message, "new_status": newStatus})
 }

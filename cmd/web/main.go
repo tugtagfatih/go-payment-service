@@ -44,7 +44,6 @@ func main() {
 	router := gin.Default()
 	config := cors.DefaultConfig()
 	config.AllowOrigins = []string{
-		"http://13.53.130.143:5173",
 		"http://payment.treuy.com",
 		"https://payment.treuy.com",
 	}
@@ -63,6 +62,7 @@ func main() {
 		}
 		publicRoutes.GET("/listings", h.ListListingsHandler)
 		publicRoutes.GET("/listings/:id", h.GetListingByIDHandler)
+		publicRoutes.GET("/deposit-banks", h.GetActiveDepositBanksHandler)
 	}
 
 	// Korumalı (Protected) KULLANICI Rotaları
@@ -93,22 +93,33 @@ func main() {
 
 	// Korumalı (Protected) ADMİN Rotaları (AYRI BİR GRUP)
 	adminRoutes := router.Group("/admin")
-	adminRoutes.Use(authService.Middleware(), authService.RoleMiddleware("approver", "admin", "master_admin"))
+
+	adminRoutes.Use(authService.Middleware(), authService.RoleMiddleware("admin", "master_admin")) // Banka yönetimi için yetki
 	{
-		adminRoutes.GET("/notifications", h.ListPaymentNotificationsHandler)
-		adminRoutes.POST("/notifications/:id/reject", h.RejectPaymentNotificationHandler)
-		adminRoutes.POST("/notifications/:id/approve", h.ApprovePaymentNotificationHandler)
+		// YENİ: Banka Yönetimi Rotaları
+		bankGroup := adminRoutes.Group("/banks")
+		{
+			bankGroup.GET("", h.ListDepositBanksHandler)                    // Tüm bankaları listele
+			bankGroup.PUT("/:id", h.UpdateDepositBankHandler)               // IBAN/Hesap sahibi güncelle
+			bankGroup.POST("/:id/toggle", h.ToggleDepositBankStatusHandler) // Aktif/Pasif yap
+		}
 
-		adminRoutes.GET("/withdrawals", h.ListWithdrawalRequestsHandler)
-		adminRoutes.POST("/withdrawals/:id/approve", h.ApproveWithdrawalRequestHandler)
-		adminRoutes.POST("/withdrawals/:id/reject", h.RejectPaymentNotificationHandler)
+		// Mevcut admin rotaları (yetkileri kontrol et)
+		// Approver rolü de bildirimleri/çekimleri onaylayabildiği için yetkilerini kontrol etmemiz lazım
+		// Örneğin: notifications listeleme/onaylama/reddetme için "approver", "admin", "master_admin"
+		adminRoutes.GET("/notifications", authService.RoleMiddleware("approver", "admin", "master_admin"), h.ListPaymentNotificationsHandler)
+		adminRoutes.POST("/notifications/:id/reject", authService.RoleMiddleware("approver", "admin", "master_admin"), h.RejectPaymentNotificationHandler)
+		adminRoutes.POST("/notifications/:id/approve", authService.RoleMiddleware("approver", "admin", "master_admin"), h.ApprovePaymentNotificationHandler)
 
+		adminRoutes.GET("/withdrawals", authService.RoleMiddleware("approver", "admin", "master_admin"), h.ListWithdrawalRequestsHandler)
+		adminRoutes.POST("/withdrawals/:id/approve", authService.RoleMiddleware("approver", "admin", "master_admin"), h.ApproveWithdrawalRequestHandler)
+		adminRoutes.POST("/withdrawals/:id/reject", authService.RoleMiddleware("approver", "admin", "master_admin"), h.RejectWithdrawalRequestHandler) // Reddetme için handler ismi düzeltildi
+
+		// Kullanıcı yönetimi rotaları (sadece admin, master_admin)
 		adminRoutes.GET("/users", authService.RoleMiddleware("admin", "master_admin"), h.ListUsersHandler)
 		adminRoutes.POST("/users/:id/ban", authService.RoleMiddleware("admin", "master_admin"), h.BanUserHandler)
 		adminRoutes.POST("/users/:id/unban", authService.RoleMiddleware("admin", "master_admin"), h.UnbanUserHandler)
-
 		adminRoutes.PUT("/users/:id/role", authService.RoleMiddleware("admin", "master_admin"), h.UpdateUserRoleHandler)
-
 		adminRoutes.GET("/manageable-users", authService.RoleMiddleware("admin", "master_admin"), h.ListManageableUsersHandler)
 	}
 
