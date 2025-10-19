@@ -935,7 +935,8 @@ func (h *Handler) ListWithdrawalRequestsHandler(c *gin.Context) {
 	sql := `
 		SELECT
 			wr.id, wr.user_id, u.username, wr.amount, wr.target_iban, wr.status, wr.created_at,
-			u.withdrawal_bank_name -- YENİ EKLENDİ
+			u.withdrawal_bank_name 
+			wr.reviewed_by, wr.reviewed_at
 		FROM withdrawal_requests wr
 		JOIN users u ON wr.user_id = u.id
 		WHERE wr.status = $1
