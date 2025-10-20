@@ -41,6 +41,7 @@ func main() {
 	h := handlers.NewHandler(dbPool, authService)
 
 	// 5. Router'ı Kur ve Rotaları Tanımla
+	gin.SetMode(gin.ReleaseMode)
 	router := gin.Default()
 	config := cors.DefaultConfig()
 	config.AllowOrigins = []string{
