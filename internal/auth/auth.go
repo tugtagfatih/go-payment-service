@@ -102,28 +102,19 @@ func (a *Auth) Middleware() gin.HandlerFunc {
 // RoleMiddleware, belirli bir rol veya daha üst bir yetki gerektiren bir middleware oluşturur.
 func (a *Auth) RoleMiddleware(requiredRoles ...string) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		// Önce normal token doğrulamasını yapıyoruz.
-		a.Middleware()(c)
-		// Eğer `Abort` edildiyse, context'ten `IsAborted()` ile anlayıp devam etmeyiz.
-		if c.IsAborted() {
+		roleValue, exists := c.Get("userRole")
+		if !exists {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "User role not found in context"})
 			return
 		}
 
-		// Token'dan gelen kullanıcı ID'sini alabiliriz (bu örnekte gerek yok ama bilgi için).
-		// userID, _ := c.Get("userID")
-
-		// Şimdi token'ı bizim özel AppClaims'imiz ile parse edip rolü alalım.
-		authHeader := c.GetHeader("Authorization")
-		tokenString := strings.TrimPrefix(authHeader, "Bearer ")
-
-		claims := &AppClaims{}
-		_, _, err := new(jwt.Parser).ParseUnverified(tokenString, claims)
-		if err != nil {
-			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "Invalid token claims"})
+		userRole, ok := roleValue.(string)
+		if !ok {
+			c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "User role format in context is invalid"})
 			return
 		}
 
-		userRole := claims.Role
+		// Rol kontrolü
 		hasPermission := false
 		for _, role := range requiredRoles {
 			if userRole == role {
@@ -137,7 +128,7 @@ func (a *Auth) RoleMiddleware(requiredRoles ...string) gin.HandlerFunc {
 			return
 		}
 
+		// Yetki varsa, bir sonraki işleme geç
 		c.Next()
 	}
 }
-

@@ -93,34 +93,40 @@ func main() {
 
 	// Korumalı (Protected) ADMİN Rotaları (AYRI BİR GRUP)
 	adminRoutes := router.Group("/admin")
-
-	adminRoutes.Use(authService.Middleware(), authService.RoleMiddleware("admin", "master_admin")) // Banka yönetimi için yetki
+	// ÖNCE AuthMiddleware çalışır, SONRA TEMEL rol kontrolü yapılır
+	adminRoutes.Use(authService.Middleware(), authService.RoleMiddleware("approver", "admin", "master_admin"))
 	{
-		// YENİ: Banka Yönetimi Rotaları
-		bankGroup := adminRoutes.Group("/banks")
+		// BU ROTALAR (Notifications, Withdrawals) TÜM admin/approver'lar içindir
+		// Ekstra RoleMiddleware'e gerek YOKTUR (ana gruptan alırlar).
+		adminRoutes.GET("/notifications", h.ListPaymentNotificationsHandler)
+		adminRoutes.POST("/notifications/:id/reject", h.RejectPaymentNotificationHandler)
+		adminRoutes.POST("/notifications/:id/approve", h.ApprovePaymentNotificationHandler)
+
+		adminRoutes.GET("/withdrawals", h.ListWithdrawalRequestsHandler)
+		adminRoutes.POST("/withdrawals/:id/approve", h.ApproveWithdrawalRequestHandler)
+		adminRoutes.POST("/withdrawals/:id/reject", h.RejectWithdrawalRequestHandler)
+
+		// BU ROTALAR SADECE 'admin' ve 'master_admin' içindir.
+		// 'approver' bu rotalara erişememeli.
+		// Yeni bir alt grup oluşturup, ekstra (daha sıkı) bir middleware ekliyoruz.
+		adminOnlyRoutes := adminRoutes.Group("/")
+		adminOnlyRoutes.Use(authService.RoleMiddleware("admin", "master_admin"))
 		{
-			bankGroup.GET("", h.ListDepositBanksHandler)                    // Tüm bankaları listele
-			bankGroup.PUT("/:id", h.UpdateDepositBankHandler)               // IBAN/Hesap sahibi güncelle
-			bankGroup.POST("/:id/toggle", h.ToggleDepositBankStatusHandler) // Aktif/Pasif yap
+			// Banka Yönetimi
+			bankGroup := adminOnlyRoutes.Group("/banks")
+			{
+				bankGroup.GET("", h.ListDepositBanksHandler)
+				bankGroup.PUT("/:id", h.UpdateDepositBankHandler)
+				bankGroup.POST("/:id/toggle", h.ToggleDepositBankStatusHandler)
+			}
+
+			// Kullanıcı yönetimi rotaları
+			adminOnlyRoutes.GET("/users", h.ListUsersHandler)
+			adminOnlyRoutes.POST("/users/:id/ban", h.BanUserHandler)
+			adminOnlyRoutes.POST("/users/:id/unban", h.UnbanUserHandler)
+			adminOnlyRoutes.PUT("/users/:id/role", h.UpdateUserRoleHandler)
+			adminOnlyRoutes.GET("/manageable-users", h.ListManageableUsersHandler)
 		}
-
-		// Mevcut admin rotaları (yetkileri kontrol et)
-		// Approver rolü de bildirimleri/çekimleri onaylayabildiği için yetkilerini kontrol etmemiz lazım
-		// Örneğin: notifications listeleme/onaylama/reddetme için "approver", "admin", "master_admin"
-		adminRoutes.GET("/notifications", authService.RoleMiddleware("approver", "admin", "master_admin"), h.ListPaymentNotificationsHandler)
-		adminRoutes.POST("/notifications/:id/reject", authService.RoleMiddleware("approver", "admin", "master_admin"), h.RejectPaymentNotificationHandler)
-		adminRoutes.POST("/notifications/:id/approve", authService.RoleMiddleware("approver", "admin", "master_admin"), h.ApprovePaymentNotificationHandler)
-
-		adminRoutes.GET("/withdrawals", authService.RoleMiddleware("approver", "admin", "master_admin"), h.ListWithdrawalRequestsHandler)
-		adminRoutes.POST("/withdrawals/:id/approve", authService.RoleMiddleware("approver", "admin", "master_admin"), h.ApproveWithdrawalRequestHandler)
-		adminRoutes.POST("/withdrawals/:id/reject", authService.RoleMiddleware("approver", "admin", "master_admin"), h.RejectWithdrawalRequestHandler) // Reddetme için handler ismi düzeltildi
-
-		// Kullanıcı yönetimi rotaları (sadece admin, master_admin)
-		adminRoutes.GET("/users", authService.RoleMiddleware("admin", "master_admin"), h.ListUsersHandler)
-		adminRoutes.POST("/users/:id/ban", authService.RoleMiddleware("admin", "master_admin"), h.BanUserHandler)
-		adminRoutes.POST("/users/:id/unban", authService.RoleMiddleware("admin", "master_admin"), h.UnbanUserHandler)
-		adminRoutes.PUT("/users/:id/role", authService.RoleMiddleware("admin", "master_admin"), h.UpdateUserRoleHandler)
-		adminRoutes.GET("/manageable-users", authService.RoleMiddleware("admin", "master_admin"), h.ListManageableUsersHandler)
 	}
 
 	// Korumalı (Protected) MASTER ADMİN Rotaları (AYRI BİR GRUP)
